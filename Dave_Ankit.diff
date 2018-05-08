@@ -1,0 +1,309 @@
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index e93ef0b..9e842af 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -338,6 +338,8 @@
+ 329	common	pkey_mprotect		sys_pkey_mprotect
+ 330	common	pkey_alloc		sys_pkey_alloc
+ 331	common	pkey_free		sys_pkey_free
++332	common	get_sec			sys_get_sec
++333	common	put_sec			sys_put_sec
+ 
+ #
+ # x32-specific system call numbers start at 512 to avoid cache impact
+diff --git a/filesecuritytag/filesecuritytag.c b/filesecuritytag/filesecuritytag.c
+new file mode 100644
+index 0000000..ff1fdae
+--- /dev/null
++++ b/filesecuritytag/filesecuritytag.c
+@@ -0,0 +1,80 @@
++#define _GNU_SOURCE
++#include <unistd.h>
++#include <sys/syscall.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <linux/fs.h>
++#include <string.h>
++#include <fcntl.h>
++#include "filesecuritytag.h"
++
++
++#define SYS_get_sec 332
++#define SYS_put_sec 333
++
++
++int set_security_tag(const char *filename, int new_tag)
++{
++  int fd=0;
++  int res=-1;
++
++  if( access( filename, R_OK|W_OK ) != -1 ) {
++    // file exists
++    fd=open(filename,O_RDWR);
++    char input[100];
++    sprintf(input,"%d",new_tag);
++//    itoa(new_tag, input, 10);
++    res=syscall(SYS_put_sec, fd, input);
++
++    return res;
++
++
++
++
++
++} else {
++    return -1;
++    // file doesn't exist
++}
++
++
++
++
++}
++int get_security_tag(const char *filename){
++
++  int fd=0;
++  int res=-1;
++
++  if( access( filename, R_OK|W_OK ) != -1 ) {
++    // file exists
++//  if(access (filename, R_OK|W_OK ) == -1)
++//      return -1;
++
++    fd=open(filename,O_RDWR);
++
++//    printf("Open done");
++    char result[100];
++    strcpy(result, "user.securitytag");
++    res=syscall(SYS_get_sec, fd, result);
++    if(res==-1)
++{
++//printf("the sys is the issue");
++res=syscall(SYS_put_sec, fd, "0");
++return res;
++}
++
++    res = atoi(result);
++    return res;
++
++} else {
++    return -1;
++    // file doesn't exist
++}
++
++
++
++}
++
+diff --git a/filesecuritytag/filesecuritytag.h b/filesecuritytag/filesecuritytag.h
+new file mode 100644
+index 0000000..2f9ff95
+--- /dev/null
++++ b/filesecuritytag/filesecuritytag.h
+@@ -0,0 +1,8 @@
++#ifndef _FILESECURITYTAG_H_
++#define _FILESECURITYTAG_H_
++
++int set_security_tag(const char *filename, int new_tag);
++int get_security_tag(const char *filename);
++
++#endif
++
+diff --git a/filesecuritytag/securitytagtest.c b/filesecuritytag/securitytagtest.c
+new file mode 100644
+index 0000000..0e06cd2
+--- /dev/null
++++ b/filesecuritytag/securitytagtest.c
+@@ -0,0 +1,16 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdbool.h>
++#include <unistd.h>
++#include <sys/types.h>
++#include <sys/wait.h>
++#include "filesecuritytag.h"
++
++int main(){
++	printf("%d\n", get_security_tag("securitytagtest.c"));
++	printf("%d\n", set_security_tag("securitytagtest.c", 5));
++	printf("%d\n", get_security_tag("securitytagtest.c"));
++	printf("%d\n", get_security_tag("nonexistentfile.txt"));
++	return -1;
++}
++
+diff --git a/fs/inode.c b/fs/inode.c
+index 3844c31..d131217 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -132,6 +132,7 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
+ 	static const struct file_operations no_open_fops = {.open = no_open};
+ 	struct address_space *const mapping = &inode->i_data;
+ 
++	inode->Security_Tag=0;
+ 	inode->i_sb = sb;
+ 	inode->i_blkbits = sb->s_blocksize_bits;
+ 	inode->i_flags = 0;
+diff --git a/fs/read_write.c b/fs/read_write.c
+index ba28059..dabd952 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -4,7 +4,7 @@
+  *  Copyright (C) 1991, 1992  Linus Torvalds
+  */
+ 
+-#include <linux/slab.h> 
++#include <linux/slab.h>
+ #include <linux/stat.h>
+ #include <linux/fcntl.h>
+ #include <linux/file.h>
+diff --git a/fs/xattr.c b/fs/xattr.c
+index 1b00bab..a7d4032 100644
+--- a/fs/xattr.c
++++ b/fs/xattr.c
+@@ -22,7 +22,10 @@
+ #include <linux/vmalloc.h>
+ #include <linux/posix_acl_xattr.h>
+ 
++#include <linux/uio.h>
++#include <linux/fcntl.h>
+ #include <asm/uaccess.h>
++#include <asm/unistd.h>
+ 
+ static const char *
+ strcmp_prefix(const char *a, const char *a_prefix)
+@@ -508,6 +511,58 @@ SYSCALL_DEFINE5(fsetxattr, int, fd, const char __user *, name,
+ 	return error;
+ }
+ 
++SYSCALL_DEFINE2(put_sec, int, fd, const void __user *, value)
++{
++        struct fd f = fdget(fd);
++        int error = -EBADF;
++	int size;
++	size=100;
++
++        if (!f.file)
++                return error;
++
++	audit_file(f.file);
++        error = mnt_want_write_file(f.file);
++
++	if (!error) {
++        void *kvalue = NULL;
++        char kname[17];
++
++        if (0 & ~(XATTR_CREATE|XATTR_REPLACE))
++                return -EINVAL;
++
++        strcpy(kname, "user.securitytag");
++
++        if (size) {
++                if (size > XATTR_SIZE_MAX)
++                        return -E2BIG;
++                kvalue = kmalloc(size, GFP_KERNEL | __GFP_NOWARN);
++                if (!kvalue) {
++                        kvalue = vmalloc(size);
++                        if (!kvalue)
++                                return -ENOMEM;
++                }
++                if (copy_from_user(kvalue, value, size)) {
++                        error = -EFAULT;
++                        goto out;
++                }
++                if ((strcmp(kname, XATTR_NAME_POSIX_ACL_ACCESS) == 0) ||
++                    (strcmp(kname, XATTR_NAME_POSIX_ACL_DEFAULT) == 0))
++                        posix_acl_fix_xattr_from_user(kvalue, size);
++
++        error = vfs_setxattr(f.file->f_path.dentry, kname, kvalue, size, 0);
++		}
++ out:
++
++ kvfree(kvalue);
++ mnt_drop_write_file(f.file);
++ fdput(f);
++
++}
++ return error;
++}
++
++
+ /*
+  * Extended attribute GET operations
+  */
+@@ -599,6 +654,20 @@ SYSCALL_DEFINE4(fgetxattr, int, fd, const char __user *, name,
+ 	return error;
+ }
+ 
++SYSCALL_DEFINE2(get_sec, int, fd, void __user *, value)
++{
++        struct fd f = fdget(fd);
++        ssize_t error = -EBADF;
++
++        if (!f.file)
++                return error;
++        audit_file(f.file);
++        error = getxattr(f.file->f_path.dentry, (const char __user *)value, value, 100);
++        fdput(f);
++        return error;
++}
++
++
+ /*
+  * Extended attribute LIST operations
+  */
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index cbcdcb2..070efeb 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -602,6 +602,7 @@ is_uncached_acl(struct posix_acl *acl)
+  * of the 'struct inode'
+  */
+ struct inode {
++	unsigned int		Security_Tag;
+ 	umode_t			i_mode;
+ 	unsigned short		i_opflags;
+ 	kuid_t			i_uid;
+diff --git a/test.c b/test.c
+new file mode 100644
+index 0000000..32f3bdb
+--- /dev/null
++++ b/test.c
+@@ -0,0 +1,36 @@
++#define _GNU_SOURCE
++#include <unistd.h>
++#include <sys/syscall.h>
++#include <stdio.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <linux/fs.h>
++#include <string.h>
++/*
++ * Put your syscall number here.
++ */
++#define SYS_get_sec 332
++#define SYS_put_sec 333
++
++int main(int argc, char **argv)
++{
++  if (argc <= 1) {
++    printf("Must provide a string to give to system call.\n");
++    return -1;
++  }
++
++//  int fd =open("sample.txt", O_RDONLY);
++  char *arg = argv[1];
++  printf("Making system call with \"%s\".\n", arg);
++  int fd = open(arg, O_RDWR );
++  int res = syscall(333, fd, "test");
++  printf("System call returned %d.\n", res);
++  char result[100];
++  strcpy(result, "user.securitytag");
++  res = syscall(332, fd, result);
++  printf("System call returned %s.\n", result);
++  return res;
++  close(fd);
++}
++
